@@ -45,17 +45,20 @@ import java.nio.charset.Charset;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Locale;
+import java.util.Stack;
 import java.util.UUID;
 
 import javax.xml.parsers.ParserConfigurationException;
 import javax.xml.parsers.SAXParser;
 import javax.xml.parsers.SAXParserFactory;
 
+import org.xml.sax.Attributes;
 import org.xml.sax.ContentHandler;
 import org.xml.sax.DTDHandler;
 import org.xml.sax.EntityResolver;
 import org.xml.sax.ErrorHandler;
 import org.xml.sax.InputSource;
+import org.xml.sax.Locator;
 import org.xml.sax.SAXException;
 import org.xml.sax.SAXNotRecognizedException;
 import org.xml.sax.SAXNotSupportedException;
@@ -74,6 +77,7 @@ public class CachingXMLReader implements XMLReader {
         SAXParserFactory sfactory = SAXParserFactory.newInstance();
         SAXParser parser = sfactory.newSAXParser();
         reader = parser.getXMLReader();
+        reader.setContentHandler(new MyContentHandler(reader.getContentHandler()));
         reader.setEntityResolver(new MyEntityResolver(reader.getEntityResolver()));
     }
 
@@ -128,7 +132,7 @@ public class CachingXMLReader implements XMLReader {
 
     @Override
     public void setContentHandler(ContentHandler handler) {
-        reader.setContentHandler(handler);
+        reader.setContentHandler(new MyContentHandler(handler));
     }
 
     @Override
@@ -154,6 +158,89 @@ public class CachingXMLReader implements XMLReader {
     @Override
     public void setProperty(String name, Object value) throws SAXNotRecognizedException, SAXNotSupportedException {
         reader.setProperty(name, value);
+    }
+
+    private class MyContentHandler implements ContentHandler {
+
+        private ContentHandler delegate;
+        private Locator locator;
+        private Stack<String> ids = new Stack<>();
+        private Stack<Integer> linenos = new Stack<>();
+
+        public MyContentHandler(ContentHandler delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public void characters(char[] ch, int start, int length) throws SAXException {
+            delegate.characters(ch, start, length);
+        }
+
+        @Override
+        public void endDocument() throws SAXException {
+            delegate.endDocument();
+        }
+
+        @Override
+        public void endElement(String uri, String localName, String qName) throws SAXException {
+            if (locator != null) {
+                if (linenos.empty() || !linenos.peek().equals(locator.getLineNumber())) {
+                    delegate.processingInstruction("lineno", "" + locator.getLineNumber());
+                }
+                ids.pop();
+                linenos.pop();
+            }
+            delegate.endElement(uri, localName, qName);
+        }
+
+        @Override
+        public void endPrefixMapping(String prefix) throws SAXException {
+            delegate.endPrefixMapping(prefix);
+        }
+
+        @Override
+        public void ignorableWhitespace(char[] ch, int start, int length) throws SAXException {
+            delegate.ignorableWhitespace(ch, start, length);
+        }
+
+        @Override
+        public void processingInstruction(String target, String data) throws SAXException {
+            delegate.processingInstruction(target, data);
+        }
+
+        @Override
+        public void setDocumentLocator(Locator locator) {
+            this.locator = locator;
+            delegate.setDocumentLocator(locator);
+        }
+
+        @Override
+        public void skippedEntity(String name) throws SAXException {
+            delegate.skippedEntity(name);
+        }
+
+        @Override
+        public void startDocument() throws SAXException {
+            delegate.startDocument();
+        }
+
+        @Override
+        public void startElement(String uri, String localName, String qName, Attributes atts) throws SAXException {
+            delegate.startElement(uri, localName, qName, atts);
+            if (locator != null) {
+                if (ids.empty() || !ids.peek().equals(locator.getSystemId())) {
+                    delegate.processingInstruction("systemid", locator.getSystemId());
+                }
+                ids.push(locator.getSystemId());
+                linenos.push(locator.getLineNumber());
+                delegate.processingInstruction("lineno", "" + locator.getLineNumber());
+            }
+        }
+
+        @Override
+        public void startPrefixMapping(String prefix, String uri) throws SAXException {
+            delegate.startPrefixMapping(prefix, uri);
+        }
     }
 
     private class MyEntityResolver implements EntityResolver {
