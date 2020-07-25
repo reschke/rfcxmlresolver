@@ -99,10 +99,8 @@ public class CachingXMLEntityResolver implements EntityResolver {
                 }
             }
 
-            InputStream is = null;
-            ByteArrayOutputStream os = new ByteArrayOutputStream();
-            try {
-                is = getContent(systemId, 5);
+            try (InputStream is = getContent(systemId, 5)) {
+                ByteArrayOutputStream os = new ByteArrayOutputStream();
                 byte[] bytes = new byte[16384];
                 int length = 0;
                 while ((length = is.read(bytes)) != -1) {
@@ -139,10 +137,6 @@ public class CachingXMLEntityResolver implements EntityResolver {
                 if (!useOld && file.exists()) {
                     return resolveEntity(publicId, systemId, true);
                 }
-            } finally {
-                if (is != null) {
-                    is.close();
-                }
             }
         }
         return null;
@@ -152,7 +146,7 @@ public class CachingXMLEntityResolver implements EntityResolver {
     public InputSource resolveEntity(String publicId, String systemId) throws SAXException, IOException {
         return resolveEntity(publicId, systemId, false);
     }
-    
+
     // Utilities
 
     private InputStream getContent(String uri, int redirects) throws IOException {
