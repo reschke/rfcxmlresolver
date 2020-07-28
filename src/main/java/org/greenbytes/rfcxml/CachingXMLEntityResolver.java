@@ -59,6 +59,8 @@ public class CachingXMLEntityResolver implements EntityResolver {
 
     private static String FOLDER = ".cachingXMLReferenceResolver";
     private static String PAYLOAD = "payload";
+    private static String STATUS = "status";
+    private static String ETAG = "field.etag";
 
     private static Charset UTF8 = Charset.forName("UTF-8");
 
@@ -92,59 +94,39 @@ public class CachingXMLEntityResolver implements EntityResolver {
                 long cutoff = System.currentTimeMillis() - DAY * 1000;
                 long filedate = file.lastModified();
                 if (filedate > cutoff || useOld) {
-                    if (filedate <= cutoff) {
-                        System.err.println(
-                                "RESOLVER: using old entry (" + (age(System.currentTimeMillis() - filedate)) + ") for " + systemId);
-                    }
-                    try (ZipFile zip = new ZipFile(file); InputStream is = zip.getInputStream(new ZipEntry(PAYLOAD))) {
-                        InputSource source = new InputSource(new ByteArrayInputStream(getBytes(is)));
-                        source.setPublicId(publicId);
-                        source.setSystemId(systemId);
-                        return source;
+                    try (ZipFile zip = new ZipFile(file)) {
+                        String status = getZipEntryContentAsString(zip, new ZipEntry(STATUS));
+                        if ("200".equals(status)) {
+                            if (filedate <= cutoff) {
+                                System.err.println(
+                                        "RESOLVER: using old entry (" + (age(System.currentTimeMillis() - filedate)) + ") for " + systemId);
+                            }
+                            try (InputStream is = zip.getInputStream(new ZipEntry(PAYLOAD))) {
+                                InputSource source = new InputSource(new ByteArrayInputStream(getBytes(is)));
+                                source.setPublicId(publicId);
+                                source.setSystemId(systemId);
+                                return source;
+                            }
+                        }
                     }
                 }
             }
 
-            try (InputStream is = getContent(systemId, 5)) {
-                byte[] bytes = getBytes(is);
-                File folder = new File(FOLDER);
-                if (!folder.exists()) {
-                    folder.mkdirs();
-                }
-                File tfile = new File(folder, UUID.randomUUID().toString());
-                try (FileOutputStream fos = new FileOutputStream(tfile); ZipOutputStream zos = new ZipOutputStream(fos)) {
-                    zos.putNextEntry(new ZipEntry(PAYLOAD));
-                    zos.write(bytes);
-                    zos.flush();
-                    zos.closeEntry();
-                    zos.close();
-                    // try rename
-                    boolean deleted = false;
-                    long filedate = file.lastModified();
-                    if (file.exists()) {
-                        deleted = file.delete();
-                    }
-                    if (tfile.renameTo(file)) {
-                        if (deleted) {
-                            System.err.println("RESOLVER: replaced " + age(System.currentTimeMillis() - filedate)
-                                    + " old entry for " + systemId);
-                        } else {
-                            System.err.println("RESOLVER: created entry for " + systemId);
-                        }
-                        return resolveEntity(publicId, systemId, true);
-                    } else {
-                        tfile.deleteOnExit();
-                        return null;
-                    }
-                }
-            } catch (IOException ex) {
-                System.err.println("RESOLVER: error for " + systemId + " - " + ex.getMessage());
-                if (!useOld && file.exists()) {
+            URLConnection conn = get(systemId, 5);
+            if (!(conn instanceof HttpURLConnection)) {
+                // what?
+                return null;
+            } else {
+                boolean success = dumpHttpResponseToFile(systemId, file, (HttpURLConnection) conn);
+                if (success) {
+                    // retry with populated cache
                     return resolveEntity(publicId, systemId, true);
+                } else {
+                    // handle back
+                    return null;
                 }
             }
         }
-        return null;
     }
 
     @Override
@@ -154,7 +136,7 @@ public class CachingXMLEntityResolver implements EntityResolver {
 
     // Utilities
 
-    private InputStream getContent(String uri, int redirects) throws IOException {
+    private URLConnection get(String uri, int redirects) throws IOException {
         URLConnection conn = new URL(uri).openConnection();
         if (conn instanceof HttpURLConnection) {
             HttpURLConnection hc = (HttpURLConnection) conn;
@@ -162,7 +144,7 @@ public class CachingXMLEntityResolver implements EntityResolver {
             hc.setConnectTimeout(2000);
             int status = hc.getResponseCode();
             if (status >= 200 && status <= 299) {
-                return hc.getInputStream();
+                return hc;
             } else if (status >= 300 && status <= 399) {
                 if (redirects < 1) {
                     throw new IOException("Too many redirects");
@@ -179,7 +161,7 @@ public class CachingXMLEntityResolver implements EntityResolver {
                             URI fin = base.resolve(red);
                             System.err.println("RESOLVER: GET on uri " + uri + " redirects with status code " + status
                                     + ", retrying with " + fin);
-                            return getContent(fin.toString(), redirects - 1);
+                            return get(fin.toString(), redirects - 1);
                         } catch (URISyntaxException ex) {
                             throw new IOException(ex);
                         }
@@ -191,7 +173,7 @@ public class CachingXMLEntityResolver implements EntityResolver {
                 throw new IOException("Status: " + status);
             }
         } else {
-            return conn.getInputStream();
+            return conn;
         }
     }
 
@@ -244,5 +226,65 @@ public class CachingXMLEntityResolver implements EntityResolver {
         }
         buffer.flush();
         return buffer.toByteArray();
+    }
+
+    private static boolean dumpHttpResponseToFile(String systemId, File destFile, HttpURLConnection conn) {
+        File folder = new File(FOLDER);
+        if (!folder.exists()) {
+            folder.mkdirs();
+        }
+        File tfile = new File(folder, UUID.randomUUID().toString());
+        try (InputStream is = conn.getInputStream();
+                FileOutputStream fos = new FileOutputStream(tfile);
+                ZipOutputStream zos = new ZipOutputStream(fos)) {
+
+            zos.putNextEntry(new ZipEntry(STATUS));
+            zos.write(Integer.toString(conn.getResponseCode()).getBytes("UTF-8"));
+            zos.flush();
+            zos.closeEntry();
+
+            String etag = conn.getHeaderField("etag");
+            if (etag != null) {
+                zos.putNextEntry(new ZipEntry(ETAG));
+                zos.write(etag.trim().getBytes("UTF-8"));
+                zos.flush();
+                zos.closeEntry();
+            }
+
+            byte[] bytes = getBytes(is);
+            zos.putNextEntry(new ZipEntry(PAYLOAD));
+            zos.write(bytes);
+            zos.flush();
+            zos.closeEntry();
+            zos.close();
+            // try rename
+            boolean deleted = false;
+            long filedate = destFile.lastModified();
+            if (destFile.exists()) {
+                deleted = destFile.delete();
+            }
+            if (tfile.renameTo(destFile)) {
+                if (deleted) {
+                    System.err.println(
+                            "RESOLVER: replaced " + age(System.currentTimeMillis() - filedate) + " old entry for " + systemId);
+                } else {
+                    System.err.println("RESOLVER: created entry for " + systemId);
+                }
+                return true;
+            } else {
+                tfile.deleteOnExit();
+            }
+        } catch (IOException ex) {
+            System.err.println("RESOLVER: error for " + systemId + " - " + ex.getMessage());
+        }
+        return false;
+    }
+
+    private static String getZipEntryContentAsString(ZipFile zf, ZipEntry entry) {
+        try (InputStream is = zf.getInputStream(entry)) {
+            return new String(getBytes(is), "UTF-8");
+        } catch (Exception expected) {
+        }
+        return null;
     }
 }
