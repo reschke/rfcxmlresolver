@@ -60,7 +60,8 @@ public class CachingXMLEntityResolver implements EntityResolver {
     private static String FOLDER = ".cachingXMLReferenceResolver";
     private static String PAYLOAD = "payload";
     private static String STATUS = "status";
-    private static String ETAG = "field.etag";
+    private static String ETAG = "etag.field";
+    private static String LOCATION = "location.field";
 
     private static Charset UTF8 = Charset.forName("UTF-8");
 
@@ -90,16 +91,18 @@ public class CachingXMLEntityResolver implements EntityResolver {
             }
 
             File file = new File(getFileForUri(systemId));
+            String etag = null;
             if (file.exists()) {
                 long cutoff = System.currentTimeMillis() - DAY * 1000;
                 long filedate = file.lastModified();
-                if (filedate > cutoff || useOld) {
-                    try (ZipFile zip = new ZipFile(file)) {
+                try (ZipFile zip = new ZipFile(file)) {
+                    etag = getZipEntryContentAsString(zip, new ZipEntry(ETAG));
+                    if (filedate > cutoff || useOld) {
                         String status = getZipEntryContentAsString(zip, new ZipEntry(STATUS));
                         if ("200".equals(status)) {
                             if (filedate <= cutoff) {
-                                System.err.println(
-                                        "RESOLVER: using old entry (" + (age(System.currentTimeMillis() - filedate)) + ") for " + systemId);
+                                System.err.println("RESOLVER: using old entry (" + (age(System.currentTimeMillis() - filedate))
+                                        + ") for " + systemId);
                             }
                             try (InputStream is = zip.getInputStream(new ZipEntry(PAYLOAD))) {
                                 InputSource source = new InputSource(new ByteArrayInputStream(getBytes(is)));
@@ -112,12 +115,12 @@ public class CachingXMLEntityResolver implements EntityResolver {
                 }
             }
 
-            URLConnection conn = get(systemId, 5);
+            URLConnection conn = get(systemId, etag, 5);
             if (!(conn instanceof HttpURLConnection)) {
                 // what?
                 return null;
             } else {
-                boolean success = dumpHttpResponseToFile(systemId, file, (HttpURLConnection) conn);
+                boolean success = dumpHttpResponseToFile(systemId, (HttpURLConnection) conn);
                 if (success) {
                     // retry with populated cache
                     return resolveEntity(publicId, systemId, true);
@@ -136,14 +139,20 @@ public class CachingXMLEntityResolver implements EntityResolver {
 
     // Utilities
 
-    private URLConnection get(String uri, int redirects) throws IOException {
+    private URLConnection get(String uri, String etag, int redirects) throws IOException {
         URLConnection conn = new URL(uri).openConnection();
         if (conn instanceof HttpURLConnection) {
             HttpURLConnection hc = (HttpURLConnection) conn;
             hc.setRequestProperty("User-Agent", "Julian's CachingXMLReader");
+            if (etag != null) {
+                hc.setRequestProperty("If-None-Match", etag);
+            }
             hc.setConnectTimeout(2000);
             int status = hc.getResponseCode();
+            // System.err.println(uri + " (" + etag + ") -> " + status);
             if (status >= 200 && status <= 299) {
+                return hc;
+            } else if (etag != null && status == 304) {
                 return hc;
             } else if (status >= 300 && status <= 399) {
                 if (redirects < 1) {
@@ -161,7 +170,7 @@ public class CachingXMLEntityResolver implements EntityResolver {
                             URI fin = base.resolve(red);
                             System.err.println("RESOLVER: GET on uri " + uri + " redirects with status code " + status
                                     + ", retrying with " + fin);
-                            return get(fin.toString(), redirects - 1);
+                            return get(fin.toString(), null, redirects - 1);
                         } catch (URISyntaxException ex) {
                             throw new IOException(ex);
                         }
@@ -228,11 +237,25 @@ public class CachingXMLEntityResolver implements EntityResolver {
         return buffer.toByteArray();
     }
 
-    private static boolean dumpHttpResponseToFile(String systemId, File destFile, HttpURLConnection conn) {
+    private static boolean dumpHttpResponseToFile(String systemId, HttpURLConnection conn) {
         File folder = new File(FOLDER);
         if (!folder.exists()) {
             folder.mkdirs();
         }
+        File destFile = new File(getFileForUri(systemId));
+        if (destFile.exists()) {
+            try {
+                if (conn.getResponseCode() == 304) {
+                    long filedate = destFile.lastModified();
+                    destFile.setLastModified(System.currentTimeMillis());
+                    System.err.println(
+                            "RESOLVER: revalidated " + age(System.currentTimeMillis() - filedate) + " old entry for " + systemId);
+                    return true;
+                }
+            } catch (IOException ignored) {
+            }
+        }
+
         File tfile = new File(folder, UUID.randomUUID().toString());
         try (InputStream is = conn.getInputStream();
                 FileOutputStream fos = new FileOutputStream(tfile);
@@ -251,12 +274,21 @@ public class CachingXMLEntityResolver implements EntityResolver {
                 zos.closeEntry();
             }
 
+            String location = conn.getHeaderField("location");
+            if (location != null) {
+                zos.putNextEntry(new ZipEntry(LOCATION));
+                zos.write(location.trim().getBytes("UTF-8"));
+                zos.flush();
+                zos.closeEntry();
+            }
+
             byte[] bytes = getBytes(is);
             zos.putNextEntry(new ZipEntry(PAYLOAD));
             zos.write(bytes);
             zos.flush();
             zos.closeEntry();
             zos.close();
+
             // try rename
             boolean deleted = false;
             long filedate = destFile.lastModified();
