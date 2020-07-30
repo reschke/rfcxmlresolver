@@ -162,6 +162,7 @@ public class CachingXMLEntityResolver implements EntityResolver {
         URLConnection conn = new URL(uri).openConnection();
         if (conn instanceof HttpURLConnection) {
             HttpURLConnection hc = (HttpURLConnection) conn;
+            hc.setInstanceFollowRedirects(false);
             hc.setRequestProperty("User-Agent", "Julian's CachingXMLReader");
             if (etag != null) {
                 hc.setRequestProperty("If-None-Match", etag);
