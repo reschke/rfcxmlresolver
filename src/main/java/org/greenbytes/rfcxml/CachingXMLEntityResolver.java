@@ -71,7 +71,7 @@ public class CachingXMLEntityResolver implements EntityResolver {
         this.resolver = entityResolver != null ? entityResolver : new DefaultHandler();
     }
 
-    private InputSource resolveEntity(String publicId, String systemId, boolean useOld) throws SAXException, IOException {
+    private InputSource resolveEntity(String publicId, String systemId, boolean allowStale) throws SAXException, IOException {
         URI parsed = null;
         try {
             parsed = new URI(systemId);
@@ -94,7 +94,7 @@ public class CachingXMLEntityResolver implements EntityResolver {
             long filedate = file.lastModified();
             try (ZipFile zip = new ZipFile(file)) {
                 etag = getZipEntryContentAsString(zip, new ZipEntry(ETAG));
-                if (filedate > cutoff || useOld) {
+                if (filedate > cutoff || allowStale) {
                     String status = getZipEntryContentAsString(zip, new ZipEntry(STATUS));
                     if ("200".equals(status)) {
                         if (filedate <= cutoff) {
