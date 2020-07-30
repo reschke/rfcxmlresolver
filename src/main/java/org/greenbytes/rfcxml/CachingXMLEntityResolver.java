@@ -72,69 +72,69 @@ public class CachingXMLEntityResolver implements EntityResolver {
     }
 
     private InputSource resolveEntity(String publicId, String systemId, boolean useOld) throws SAXException, IOException {
-        if (systemId == null || systemId.isEmpty()) {
-            return resolver.resolveEntity(publicId, systemId);
-        } else {
-            URI parsed = null;
-            try {
-                parsed = new URI(systemId);
-                if (parsed.getScheme() == null || parsed.getScheme().toLowerCase(Locale.ENGLISH).equals("file")) {
-                    return null;
-                }
-            } catch (URISyntaxException e) {
-                System.err.println("RESOLVER: not a URI: " + systemId);
+        URI parsed = null;
+        try {
+            parsed = new URI(systemId);
+            if (parsed.getScheme() == null || parsed.getScheme().toLowerCase(Locale.ENGLISH).equals("file")) {
                 return null;
             }
+        } catch (URISyntaxException e) {
+            System.err.println("RESOLVER: not a URI: " + systemId);
+            return null;
+        }
 
-            if (!systemId.contains("reference.")) {
-                return null;
-            }
+        if (!systemId.contains("reference.")) {
+            return null;
+        }
 
-            File file = new File(getFileForUri(systemId));
-            String etag = null;
-            if (file.exists()) {
-                long cutoff = System.currentTimeMillis() - DAY * 1000;
-                long filedate = file.lastModified();
-                try (ZipFile zip = new ZipFile(file)) {
-                    etag = getZipEntryContentAsString(zip, new ZipEntry(ETAG));
-                    if (filedate > cutoff || useOld) {
-                        String status = getZipEntryContentAsString(zip, new ZipEntry(STATUS));
-                        if ("200".equals(status)) {
-                            if (filedate <= cutoff) {
-                                System.err.println("RESOLVER: using old entry (" + (age(System.currentTimeMillis() - filedate))
-                                        + ") for " + systemId);
-                            }
-                            try (InputStream is = zip.getInputStream(new ZipEntry(PAYLOAD))) {
-                                InputSource source = new InputSource(new ByteArrayInputStream(getBytes(is)));
-                                source.setPublicId(publicId);
-                                source.setSystemId(systemId);
-                                return source;
-                            }
+        File file = new File(getFileForUri(systemId));
+        String etag = null;
+        if (file.exists()) {
+            long cutoff = System.currentTimeMillis() - DAY * 1000;
+            long filedate = file.lastModified();
+            try (ZipFile zip = new ZipFile(file)) {
+                etag = getZipEntryContentAsString(zip, new ZipEntry(ETAG));
+                if (filedate > cutoff || useOld) {
+                    String status = getZipEntryContentAsString(zip, new ZipEntry(STATUS));
+                    if ("200".equals(status)) {
+                        if (filedate <= cutoff) {
+                            System.err.println("RESOLVER: using old entry (" + (age(System.currentTimeMillis() - filedate))
+                                    + ") for " + systemId);
+                        }
+                        try (InputStream is = zip.getInputStream(new ZipEntry(PAYLOAD))) {
+                            InputSource source = new InputSource(new ByteArrayInputStream(getBytes(is)));
+                            source.setPublicId(publicId);
+                            source.setSystemId(systemId);
+                            return source;
                         }
                     }
                 }
             }
+        }
 
-            URLConnection conn = get(systemId, etag, 5);
-            if (!(conn instanceof HttpURLConnection)) {
-                // what?
-                return null;
+        URLConnection conn = get(systemId, etag, 5);
+        if (!(conn instanceof HttpURLConnection)) {
+            // what?
+            return null;
+        } else {
+            boolean success = dumpHttpResponseToFile(systemId, (HttpURLConnection) conn);
+            if (success) {
+                // retry with populated cache
+                return resolveEntity(publicId, systemId, true);
             } else {
-                boolean success = dumpHttpResponseToFile(systemId, (HttpURLConnection) conn);
-                if (success) {
-                    // retry with populated cache
-                    return resolveEntity(publicId, systemId, true);
-                } else {
-                    // handle back
-                    return null;
-                }
+                // handle back
+                return null;
             }
         }
     }
 
     @Override
     public InputSource resolveEntity(String publicId, String systemId) throws SAXException, IOException {
-        return resolveEntity(publicId, systemId, false);
+        if (systemId == null || systemId.isEmpty()) {
+            return resolver.resolveEntity(publicId, systemId);
+        } else {
+            return resolveEntity(publicId, systemId, false);
+        }
     }
 
     // Utilities
