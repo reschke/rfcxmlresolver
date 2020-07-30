@@ -71,7 +71,8 @@ public class CachingXMLEntityResolver implements EntityResolver {
         this.resolver = entityResolver != null ? entityResolver : new DefaultHandler();
     }
 
-    private InputSource resolveEntity(String publicId, String systemId, boolean allowStale) throws SAXException, IOException {
+    private InputSource resolveEntity(String publicId, String systemId, boolean allowStale, int redirects)
+            throws SAXException, IOException {
         URI parsed = null;
         try {
             parsed = new URI(systemId);
@@ -90,14 +91,16 @@ public class CachingXMLEntityResolver implements EntityResolver {
         File file = new File(getFileForUri(systemId));
         String etag = null;
         if (file.exists()) {
-            long cutoff = System.currentTimeMillis() - DAY * 1000;
             long filedate = file.lastModified();
             try (ZipFile zip = new ZipFile(file)) {
+                String status = getZipEntryContentAsString(zip, new ZipEntry(STATUS));
                 etag = getZipEntryContentAsString(zip, new ZipEntry(ETAG));
-                if (filedate > cutoff || allowStale) {
-                    String status = getZipEntryContentAsString(zip, new ZipEntry(STATUS));
-                    if ("200".equals(status)) {
-                        if (filedate <= cutoff) {
+                String location = getZipEntryContentAsString(zip, new ZipEntry(LOCATION));
+
+                if ("200".equals(status)) {
+                    long cutoff = System.currentTimeMillis() - DAY * 1000;
+                    if (filedate >= cutoff || allowStale) {
+                        if (allowStale) {
                             System.err.println("RESOLVER: using old entry (" + (age(System.currentTimeMillis() - filedate))
                                     + ") for " + systemId);
                         }
@@ -108,24 +111,40 @@ public class CachingXMLEntityResolver implements EntityResolver {
                             return source;
                         }
                     }
+                } else if (location != null
+                        && ("301".equals(status) || "302".equals(status) || "307".equals(status) || "308".equals(status))) {
+                    if (redirects <= 0) {
+                        System.err.println("RESOLVER: maximum number of redirects reached, giving up...");
+                    } else {
+                        boolean isPermanent = "301".equals(status) || "308".equals(status);
+                        long cutoff = System.currentTimeMillis() - (isPermanent ? WEEK * 4 : DAY) * 1000;
+                        if (location != null && (filedate >= cutoff || allowStale)) {
+                            if (allowStale) {
+                                System.err.println("RESOLVER: using old entry (" + (age(System.currentTimeMillis() - filedate))
+                                        + ") for " + systemId);
+                            }
+                            try {
+                                URI red = new URI(location);
+                                URI base = new URI(systemId);
+                                URI fin = base.resolve(red);
+                                System.err.println("RESOLVER: cached response for " + systemId + " redirects with status code "
+                                        + status + " to " + fin);
+                                return resolveEntity(publicId, fin.toASCIIString(), allowStale, redirects - 1);
+                            } catch (URISyntaxException ex) {
+                                throw new IOException(ex);
+                            }
+                        }
+                    }
+                } else {
+                    System.err.println("RESOLVER: cached status for " + systemId + " is " + status + " (location: " + location
+                            + "); giving up...");
+                    return null;
                 }
             }
         }
 
-        URLConnection conn = get(systemId, etag, 5);
-        if (!(conn instanceof HttpURLConnection)) {
-            // what?
-            return null;
-        } else {
-            boolean success = dumpHttpResponseToFile(systemId, (HttpURLConnection) conn);
-            if (success) {
-                // retry with populated cache
-                return resolveEntity(publicId, systemId, true);
-            } else {
-                // handle back
-                return null;
-            }
-        }
+        boolean success = populateCache(systemId, etag);
+        return resolveEntity(publicId, systemId, !success, redirects);
     }
 
     @Override
@@ -133,13 +152,13 @@ public class CachingXMLEntityResolver implements EntityResolver {
         if (systemId == null || systemId.isEmpty()) {
             return resolver.resolveEntity(publicId, systemId);
         } else {
-            return resolveEntity(publicId, systemId, false);
+            return resolveEntity(publicId, systemId, false, 5);
         }
     }
 
     // Utilities
 
-    private URLConnection get(String uri, String etag, int redirects) throws IOException {
+    private boolean populateCache(String uri, String etag) throws IOException {
         URLConnection conn = new URL(uri).openConnection();
         if (conn instanceof HttpURLConnection) {
             HttpURLConnection hc = (HttpURLConnection) conn;
@@ -148,41 +167,10 @@ public class CachingXMLEntityResolver implements EntityResolver {
                 hc.setRequestProperty("If-None-Match", etag);
             }
             hc.setConnectTimeout(2000);
-            int status = hc.getResponseCode();
-            // System.err.println(uri + " (" + etag + ") -> " + status);
-            if (status >= 200 && status <= 299) {
-                return hc;
-            } else if (etag != null && status == 304) {
-                return hc;
-            } else if (status >= 300 && status <= 399) {
-                if (redirects < 1) {
-                    throw new IOException("Too many redirects");
-                } else {
-                    String loc = hc.getHeaderField("location");
-                    if (loc == null) {
-                        System.err.println("RESOLVER: GET on uri " + uri + " redirects with status code " + status
-                                + ", no location header field");
-                        throw new IOException("redirected with " + status + ", but no location");
-                    } else {
-                        try {
-                            URI red = new URI(loc);
-                            URI base = new URI(uri);
-                            URI fin = base.resolve(red);
-                            System.err.println("RESOLVER: GET on uri " + uri + " redirects with status code " + status
-                                    + ", retrying with " + fin);
-                            return get(fin.toString(), null, redirects - 1);
-                        } catch (URISyntaxException ex) {
-                            throw new IOException(ex);
-                        }
-
-                    }
-                }
-            } else {
-                System.err.println("RESOLVER: GET on uri " + uri + " failed with status code " + status);
-                throw new IOException("Status: " + status);
-            }
+            return dumpHttpResponseToFile(uri, (HttpURLConnection) conn);
         } else {
-            return conn;
+            System.err.println("RESOLVER: URLConnection for " + uri + " is not an HttpURLConnection");
+            return false;
         }
     }
 
@@ -212,6 +200,7 @@ public class CachingXMLEntityResolver implements EntityResolver {
     private static long MINUTE = 60;
     private static long HOUR = 60 * MINUTE;
     private static long DAY = 24 * HOUR;
+    private static long WEEK = 7 * DAY;
 
     private static String age(long ms) {
         long sec = ms / 1000;
