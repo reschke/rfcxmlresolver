@@ -54,6 +54,7 @@ public class CachingXMLReader implements XMLReader {
         SAXParserFactory sfactory = SAXParserFactory.newInstance();
         SAXParser parser = sfactory.newSAXParser();
         reader = parser.getXMLReader();
+        // reader.setContentHandler(new LineNumberingContentHandler(reader.getContentHandler()));
         reader.setEntityResolver(new CachingXMLEntityResolver(reader.getEntityResolver()));
     }
 
@@ -108,6 +109,7 @@ public class CachingXMLReader implements XMLReader {
 
     @Override
     public void setContentHandler(ContentHandler handler) {
+        // reader.setContentHandler(new LineNumberingContentHandler(handler));
         reader.setContentHandler(handler);
     }
 
