@@ -1,7 +1,7 @@
 /**
  *  CachingXMLEntityResolver for use with xml2rfc related tools
  * 
- *  Copyright (c) 2016-2020, Julian Reschke (julian.reschke@greenbytes.de)
+ *  Copyright (c) 2016-2022, Julian Reschke (julian.reschke@greenbytes.de)
  *  All rights reserved.
  *
  *  Redistribution and use in source and binary forms, with or without
@@ -135,6 +135,13 @@ public class CachingXMLEntityResolver implements EntityResolver {
                             }
                         }
                     }
+                } else if ("404".equals(status)) {
+                    long cutoff = System.currentTimeMillis() - 15 * MINUTE * 1000;
+                    if (filedate >= cutoff) {
+                        System.err.println("RESOLVER: using old 'not found' entry (" + (age(System.currentTimeMillis() - filedate))
+                                + ") for " + systemId);
+                        return null;
+                    }
                 } else {
                     System.err.println("RESOLVER: cached status for " + systemId + " is " + status + " (location: " + location
                             + "); giving up...");
@@ -228,31 +235,33 @@ public class CachingXMLEntityResolver implements EntityResolver {
     }
 
     private static boolean dumpHttpResponseToFile(String systemId, HttpURLConnection conn) {
+
+        int status = -1;
+        try {
+            status = conn.getResponseCode();
+        } catch (IOException ignored) {
+        }
+
         File folder = new File(FOLDER);
         if (!folder.exists()) {
             folder.mkdirs();
         }
         File destFile = new File(getFileForUri(systemId));
         if (destFile.exists()) {
-            try {
-                if (conn.getResponseCode() == 304) {
-                    long filedate = destFile.lastModified();
-                    destFile.setLastModified(System.currentTimeMillis());
-                    System.err.println(
-                            "RESOLVER: revalidated " + age(System.currentTimeMillis() - filedate) + " old entry for " + systemId);
-                    return true;
-                }
-            } catch (IOException ignored) {
+            if (status == 304) {
+                long filedate = destFile.lastModified();
+                destFile.setLastModified(System.currentTimeMillis());
+                System.err.println(
+                        "RESOLVER: revalidated " + age(System.currentTimeMillis() - filedate) + " old entry for " + systemId);
+                return true;
             }
         }
 
         File tfile = new File(folder, UUID.randomUUID().toString());
-        try (InputStream is = conn.getInputStream();
-                FileOutputStream fos = new FileOutputStream(tfile);
-                ZipOutputStream zos = new ZipOutputStream(fos)) {
+        try (FileOutputStream fos = new FileOutputStream(tfile); ZipOutputStream zos = new ZipOutputStream(fos)) {
 
             zos.putNextEntry(new ZipEntry(STATUS));
-            zos.write(Integer.toString(conn.getResponseCode()).getBytes("UTF-8"));
+            zos.write(Integer.toString(status).getBytes("UTF-8"));
             zos.flush();
             zos.closeEntry();
 
@@ -272,11 +281,15 @@ public class CachingXMLEntityResolver implements EntityResolver {
                 zos.closeEntry();
             }
 
-            byte[] bytes = getBytes(is);
-            zos.putNextEntry(new ZipEntry(PAYLOAD));
-            zos.write(bytes);
-            zos.flush();
-            zos.closeEntry();
+            try (InputStream is = conn.getInputStream()) {
+                byte[] bytes = getBytes(is);
+                zos.putNextEntry(new ZipEntry(PAYLOAD));
+                zos.write(bytes);
+                zos.flush();
+                zos.closeEntry();
+            } catch (IOException ignored) {
+            }
+
             zos.close();
 
             // try rename
@@ -297,7 +310,7 @@ public class CachingXMLEntityResolver implements EntityResolver {
                 tfile.deleteOnExit();
             }
         } catch (IOException ex) {
-            System.err.println("RESOLVER: error for " + systemId + " - " + ex.getMessage());
+            System.err.println("RESOLVER: error " + status + " for " + systemId + " - " + ex.getMessage());
         }
         return false;
     }
