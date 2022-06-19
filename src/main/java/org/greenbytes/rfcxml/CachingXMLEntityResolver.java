@@ -240,6 +240,7 @@ public class CachingXMLEntityResolver implements EntityResolver {
         try {
             status = conn.getResponseCode();
         } catch (IOException ignored) {
+            System.err.println("RESOLVER: " + ignored.getMessage());
         }
 
         File folder = new File(FOLDER);
