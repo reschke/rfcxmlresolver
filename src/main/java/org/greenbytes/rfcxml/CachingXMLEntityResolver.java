@@ -73,6 +73,13 @@ public class CachingXMLEntityResolver implements EntityResolver {
 
     private InputSource resolveEntity(String publicId, String systemId, boolean allowStale, int redirects)
             throws SAXException, IOException {
+        String old = "https://www.rfc-editor.org/refs/bibxml/";
+        String replacement = "https://bib.ietf.org/public/rfc/bibxml/";
+        if (systemId.startsWith(old)) {
+            System.err.println(
+                    "RESOLVER: rewriting from " + old + " to " + replacement);
+            systemId = systemId.replace(old, replacement);
+        }
         URI parsed = null;
         try {
             parsed = new URI(systemId);
